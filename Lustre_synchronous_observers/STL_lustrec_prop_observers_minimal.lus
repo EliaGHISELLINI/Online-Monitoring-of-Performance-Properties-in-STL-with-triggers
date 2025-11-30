@@ -1,0 +1,472 @@
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------- USEFUL NODES BY -------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- needed to be added when removed "include 'kind2_lib.lus' "
+-- faster computation then with library imported
+node kind2_times(x1: real ; x2: real ) returns (prod : real);
+let
+	prod = x1*x2 ;
+tel
+
+node signal_crossing (ref, sys : real) returns (crossing : bool) ;
+
+let 
+	crossing = (ref = sys) -> ((pre ref < pre sys) and (ref >= sys)) or ((pre ref > pre sys) and (ref <= sys)) ; 
+tel
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------- TRIGGER EVENTS INSTANTANEOUS-----------------------------------------------------------------
+-- synchronous observers for the trigger properties.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- trigger_on overshoot
+node trigger_on_overshoot ( p_trigger: bool ; ref, sys: real ) returns ( trigger: bool ) ;
+let
+	trigger =  ( not p_trigger ) and ( signal_crossing(ref,sys) ) ;
+tel
+
+-- trigger_off overshoot 
+node trigger_off_overshoot ( p_trigger: bool ; ref, sys: real ) returns ( trigger: bool ) ;
+let
+	trigger = ( p_trigger ) and ( signal_crossing(ref,sys) ) ;
+tel
+
+-- trigger_on rise time
+node trigger_on_rise_time ( p_trigger: bool ; ref, sys: real;  bound: real ) returns ( trigger: bool ) ;
+let
+	trigger = false -> ( not p_trigger ) and (absolute_value ( ref - sys ) > bound ) and
+	 ( absolute_value ( sys - ref )  <= ( pre absolute_value ( sys - ref ) ) ) ;
+tel
+
+-- trigger_off_rise_time - Version with the bound
+node trigger_off_rise_time ( p_trigger: bool ; ref, sys: real ;  bound: real ) returns ( trigger: bool ) ;
+let
+	trigger = false -> ( p_trigger ) and ( (pre absolute_value(ref - sys) ) < bound )  ;
+tel
+
+-- trigger_on settling time
+node trigger_on_settling_time ( p_trigger: bool ; ref, sys: real;  bound: real ) returns ( trigger: bool ) ;
+let
+	trigger = false ->  ( not p_trigger ) and ( absolute_value ( sys - ref ) > bound ) and ( absolute_value ( sys - ref )  <= (pre absolute_value ( sys - ref )) ) ;
+tel
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------- PROPERTIES VERIFICATION --------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+-- synchronous observers for the performance properties.
+
+
+-------------------------------------------------------- TRANSIENT PROPERTIES -----------------------------------------------------------------------------
+
+-- overshoot verification.
+node overshoot_verification ( ref, sys, bound : real ) returns ( trigger, eval: bool ) ;
+
+let
+	trigger = false -> 
+		-- the reference signal does not change
+		(pre ref = ref) and ( 
+		-- the trigger_on event has occurrend
+		( trigger_on_overshoot ( pre trigger, ref, sys) or (pre trigger ))  and 
+		-- the trigger_off event has not occurred
+		( not trigger_off_overshoot (pre trigger, ref, sys) ) 
+	);
+	eval = if (trigger) then 
+		( absolute_value ( sys-ref ) <= bound ) 
+		else (true) ;
+	
+tel
+
+
+-- rise time verification.
+node rise_time_verification ( ref, sys : real ; const bound : real ; const time_rt: int ; time_step : int ) returns (  trigger, eval: bool) ;
+
+var 
+  mres1,mres2, res1,res2 : bool ;
+  time_step_reset : int ;
+
+let
+	trigger = false -> 
+		-- the reference signal does not change
+		(pre ref = ref) and ( 
+		-- the trigger_on event has occurrend
+		( trigger_on_rise_time ( pre trigger, ref, sys, bound) or (pre trigger ))  and 
+		-- the trigger_off event has not occurred
+		( not trigger_off_rise_time (pre trigger, ref, sys, bound) ) 
+	);
+
+	time_step_reset = (0 -> if (not (pre ref = ref) ) then time_step else (pre time_step_reset) ); 
+
+	mres1, mres2 = eventually_3v_var (time_step_reset, time_rt + time_step_reset, absolute_value ( sys-ref ) <= bound ) ;
+  
+  res1 = if (pre ref = ref) then mres1 else false;
+	res2 = if (pre ref = ref) then mres2 else false;
+
+	eval = if (trigger) then 
+		( res1 or not res2 ) --values U are desplayed as T
+		else (true) ;
+tel
+
+
+-- settling time verification.
+node settling_time_verification ( time_st_observ, time_step: int ; ref, sys : real ; const bound: real  ; const b : int ) returns ( trigger, eval: bool ) ;
+
+var 
+  res1,res2 : bool ;
+  time_step_reset : int ;
+
+let
+	trigger = false -> 
+		-- the reference signal does not change
+		(pre ref = ref) and ( 
+		-- the trigger_on event has occurrend
+		( trigger_on_settling_time ( pre trigger, ref, sys, bound) or (pre trigger )) 
+	) and ( not ( time_step = b ) ) ;
+
+	time_step_reset = (0 -> if (not (pre ref = ref) ) then time_step else (pre time_step_reset) ); 
+
+	res1, res2 = always_3v_var (time_st_observ + time_step_reset, b, absolute_value ( sys-ref ) <= bound );
+
+	eval =  if (trigger) then 
+		( res1 or not res2 ) 
+		else (true) ;
+tel
+
+
+-- steady-state error verification
+node steady_state_verification ( time_step: int ; ref, sys : real ;  bound: real  ;  b : int ) returns ( trigger, eval: bool ) ;
+
+let
+	trigger = false ->  time_step = b; -- verification at the end of the specified observation window
+	eval = if (trigger) then 
+		( absolute_value ( sys-ref ) <= bound )  
+		else (true) ;
+tel
+
+-------------------------------------------------------- PROPERTIES BY ESA -------------------------------------------------------------------------------
+
+-- APE
+node APE_verification ( ref, sys : real ;  bound: real ; p_trigger: bool ) returns ( eval: bool ) ;
+
+let
+	eval = if (p_trigger) then absolute_value ( sys-ref ) <= bound 
+		else true;
+tel
+
+-- MPE
+-- in this version, the user may specify the values for which the mean is to be computed. This grants flexibility on when to do the evaluation.
+-- the number of values used in the calculation of the mean is hardcoded
+node MPE_verification_5 
+  ( ref, sys : real ;  bound: real ; p_trigger: bool ;
+  e_1 , e_2 , e_3 , e_4 , e_5 : real ; 
+  ) 
+  returns ( eval: bool ) ;
+
+var 
+  internal_clk : int ; 
+  ave : real ;
+
+nb_samples_i : int ;
+nb_samples_r : real ;
+
+let
+
+  nb_samples_i = 5 ;
+  nb_samples_r = 5.0 ;
+	internal_clk = if p_trigger then ( min(1 -> pre internal_clk + 1, nb_samples_i) ) else 1; --activate the count only if the trigger property is on
+	ave = (e_1 + e_2 + e_3 + e_4 + e_5 ) / nb_samples_r ;
+	eval = if ( internal_clk = nb_samples_i ) then ( absolute_value (ave) <= bound ) else ( true ) ; --do the verification only when the vector is full
+tel
+
+
+-- RPE
+-- in this version, the user may specify the values for which the mean is to be computed. This grants flexibility on when to do the evaluation.
+-- the number of values used in the calculation of the mean is hardcoded
+node RPE_verification_5 
+  ( ref, sys : real ;  bound: real ; p_trigger: bool ;
+  e_1 , e_2 , e_3 , e_4 , e_5 : real ) 
+  returns ( eval: bool ) ;
+
+var 
+  internal_clk: int ;
+  ave : real ;
+ nb_samples_r : real ;
+ nb_samples_i : int ;
+
+let
+ nb_samples_r = 5.0 ;
+ nb_samples_i  = 5 ;
+	internal_clk = if p_trigger then ( min(1 -> pre internal_clk + 1, nb_samples_i) ) else 1; --activate the count only if the trigger property is on
+	ave = (e_1 + e_2 + e_3 + e_4 + e_5 ) / nb_samples_r ;
+	-- the evaluation checks the compliance for each value of the array
+  eval = if ( internal_clk = nb_samples_i ) then ( 
+    (absolute_value (e_1 - ave) <= bound)  and  (absolute_value (e_2 - ave) <= bound) and  (absolute_value (e_3 - ave) <= bound) and  (absolute_value (e_4 - ave) <= bound) and  (absolute_value (e_5 - ave) <= bound)
+    ) else ( true ) ;
+tel
+
+-- PDE
+-- in this version, the user may specify the values for which the mean is to be computed. This grants flexibility on when to do the evaluation.
+-- the number of values used in the calculation of the mean is hardcoded
+node PDE_verification_5 
+  ( ref, sys : real ; bound: real ; p_trigger: bool ;  interval : int ;
+  e_11 , e_12 , e_13 , e_14 , e_15, e_21 , e_22 , e_23 , e_24 , e_25 : real ) 
+  returns ( eval: bool ) ;
+
+var 
+  internal_clk: int ;
+  ave1, ave2 : real ;
+ nb_samples_r : real ;
+ nb_samples_i : int  ;
+
+let
+ nb_samples_r = 5.0 ;
+ nb_samples_i = 5 ;
+	internal_clk = 1 -> if ( (not p_trigger) and (pre internal_clk = ( nb_samples_i + interval )) ) then 1  else ( pre internal_clk + 1 ); --reset counter every 2 intervals and activate the count only if the trigger property is on
+	ave1 = (e_11 + e_12 + e_13 + e_14 + e_15) / nb_samples_r ;
+  ave2 = (e_21 + e_22 + e_23 + e_24 + e_25) / nb_samples_r ;
+	eval = if ( internal_clk = nb_samples_i + interval ) then ( absolute_value( ave1 - ave2 ) <= bound ) else ( true ) ; --do the evaluation only when you have both results
+tel
+
+-------------------------------------------------------- PROPERTIES BY ESA -------------------------------------------------------------------------------
+---------------------------------------------------- alternative implementation of mean value operation --------------------------------------------------
+
+-- this version takes as input only the ref and sys, and stored the values in local variables of the node.
+-- the number of inputs is reduced, but there is no flexibility on the values used in the computation of the mean value.
+-- A trigger must be added in the node using this verification, so that the node it not run before the minimum number of instants (5) has passed
+
+node MPE_verification_5_simple
+  ( ref, sys : real ; bound: real ; p_trigger: bool ) 
+  returns ( eval: bool ) ;
+
+var 
+  internal_clk: int ;
+  ave : real ;
+  e_1 , e_2 , e_3 , e_4 , e_5 : real ;
+ nb_samples_r : real ;
+ nb_samples_i : int ;
+
+let
+ nb_samples_r = 5.0 ;
+ nb_samples_i = 5 ;
+  e_5 = 0.0 -> absolute_value (ref - sys) ;
+  e_4 = 0.0 -> pre e_5 ;
+  e_3 = 0.0 -> pre e_4 ;
+  e_2 = 0.0 -> pre e_3 ;
+  e_1 = 0.0 -> pre e_2 ;
+
+	internal_clk = if p_trigger then ( min(1 -> pre internal_clk + 1, nb_samples_i) ) else 1; --activate the count only if the trigger property is on
+	ave = (e_1 + e_2 + e_3 + e_4 + e_5 ) / nb_samples_r ;
+	eval = if ( internal_clk = nb_samples_i ) then ( absolute_value (ave) <= bound ) else ( true ) ; --do the verification only when the vector is full
+tel
+
+
+-- RPE
+node RPE_verification_5_simple
+  ( ref, sys : real ; bound: real ; p_trigger: bool ) 
+  returns ( eval: bool ) ;
+
+var 
+  internal_clk: int ;
+  ave : real ;
+  e_1 , e_2 , e_3 , e_4 , e_5 : real ;
+  nb_samples_r : real ;
+ nb_samples_i : int ;
+
+let
+ nb_samples_r = 5.0 ;
+ nb_samples_i = 5 ;
+  e_5 = 0.0 -> absolute_value (ref - sys) ;
+  e_4 = 0.0 -> pre e_5 ;
+  e_3 = 0.0 -> pre e_4 ;
+  e_2 = 0.0 -> pre e_3 ;
+  e_1 = 0.0 -> pre e_2 ;
+
+	internal_clk = if p_trigger then ( min(1 -> pre internal_clk + 1, nb_samples_i) ) else 1; --activate the count only if the trigger property is on
+	ave = (e_1 + e_2 + e_3 + e_4 + e_5 ) / nb_samples_r ;
+	-- the evaluation checks the compliance for each value of the array
+  eval = if ( internal_clk = nb_samples_i ) then ( 
+    (absolute_value (e_1 - ave) <= bound)  and  (absolute_value (e_2 - ave) <= bound) and  (absolute_value (e_3 - ave) <= bound) and  (absolute_value (e_4 - ave) <= bound) and  (absolute_value (e_5 - ave) <= bound)
+    ) else ( true ) ;
+tel
+
+-- PDE
+node PDE_verification_5_simple
+  ( ref, sys : real ; bound: real ; p_trigger: bool ; ) 
+  returns ( eval: bool ) ;
+
+var 
+  internal_clk: int ;
+  ave1, ave2 : real ;
+  e_11 , e_12 , e_13 , e_14 , e_15, e_21 , e_22 , e_23 , e_24 , e_25 : real ;
+ nb_samples_r : real ;
+ nb_samples_i : int ;
+interval: int;
+let
+ nb_samples_r = 5.0 ;
+ nb_samples_i = 5 ;
+ interval = 3 ;
+  e_25 = 0.0 -> absolute_value (ref - sys) ;
+  e_24 = 0.0 -> pre e_25 ;
+  e_23 = 0.0 -> pre e_24 ;
+  e_22 = 0.0 -> pre e_23 ;
+  e_21 = 0.0 -> pre e_22 ;
+  e_15 = 0.0 -> pre (pre (pre e_21 )) ; --skip 3 instants
+  e_14 = 0.0 -> pre e_15 ;
+  e_13 = 0.0 -> pre e_14 ;
+  e_12 = 0.0 -> pre e_13 ;
+  e_11 = 0.0 -> pre e_12 ;
+	
+  internal_clk = 1 -> if ( (not p_trigger) and (pre internal_clk = ( nb_samples_i + interval )) ) then 1  else ( pre internal_clk + 1 ); --reset counter every 2 intervals and activate the count only if the trigger property is on
+	ave1 = (e_11 + e_12 + e_13 + e_14 + e_15) / nb_samples_r ;
+  ave2 = (e_21 + e_22 + e_23 + e_24 + e_25) / nb_samples_r ;
+	eval = if ( internal_clk = nb_samples_i + interval ) then ( absolute_value( ave1 - ave2 ) <= bound ) else ( true ) ; --do the evaluation only when you have both results
+tel
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------- NODES FOR PROPERTIES VERIFICATION -----------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+--    The version of the nodes by Bellanger et at. [DOI: 10.4204/eptcs.395.14] is proven with Kind2, but the interval [a,b] is constant, which is not applicable to piecewise inputs.
+--   The modification consists in introducing the capability of having a reset mechanism to observe time intervals that change.
+--  To do so, the solution proposed is to change by  to var, and introduce a reset mechanism in the performance observer.
+
+
+----------------------------------------------------------------------
+--                     useful nodes                                 --
+----------------------------------------------------------------------
+
+------------ Useful Nodes Eventually Variable ------------
+
+node timeab_tmp_var ( a,b: int) returns (internal_clk: int;
+     		       	    	 	  inside_time_interval: bool);
+let
+    internal_clk = min((0 -> 1 + pre internal_clk), b);
+    inside_time_interval = (internal_clk >= a) and not ((-1 -> pre internal_clk) = b);
+tel
+
+
+-- Final Implementation node hiding internal flows
+node timeab_var (a,b: int) returns (inside_time_interval: bool);
+var iclk: int; 
+let
+   iclk, inside_time_interval = timeab_tmp_var(a,b);
+tel
+
+node exist_var (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let
+    output = (inside_time_interval and prop); 
+tel
+
+node forall_a_var (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let 
+    output = not(exist_var(inside_time_interval, not prop));
+tel
+
+
+----------------------------------------------------------------------
+--                            Eventually variable                   --
+----------------------------------------------------------------------
+
+node eventually_3v_var( a,b:int; phi: bool)
+  returns (output_ev_true, output_ev_false: bool);
+
+let
+  output_ev_true = eventually_true_var(a,b,phi);
+  output_ev_false = eventually_false_var(a,b,phi);
+tel
+
+-- Eventually True:
+-- true when we are sure that property is satisfied
+node eventually_true_var ( a,b: int ; phi: bool)
+             returns (output_ev_true: bool);
+let
+   output_ev_true = exist_var (timeab_var (a, b), phi);
+tel
+
+-- Eventually False: 
+-- true when we are sure that property is not satisfied
+node eventually_false_var ( a,b: int ; phi: bool) 
+returns (output_ev_false: bool);
+var ev_time: int;
+let
+    ev_time = min(0 -> pre ev_time + 1, b);
+
+    output_ev_false = (ev_time = b) and  
+    (forall_a_var (timeab_var (a,b), not phi));
+tel
+
+----------------------------------------------------------------------
+--                            Always variable                       --
+----------------------------------------------------------------------
+
+node always_3v_var ( a,b:int; phi: bool)
+  returns (output_alw_true, output_alw_false: bool);
+
+let  
+    output_alw_true = always_true_var(a,b,phi);
+    output_alw_false = always_false_var(a,b,phi);
+tel
+
+-- Always True: 
+node always_true_var (a,b: int ; phi: bool) returns (output_alw_true: bool);
+var alw_time: int;
+let
+    alw_time = min(0 -> pre alw_time + 1, b);
+
+    output_alw_true = (alw_time = b) and 
+    (forall_a ( timeab_var(a,b), phi ) );
+tel
+
+-- Always False: 
+-- true when we are sure that property is not satisfied
+node always_false_var (a,b: int ; phi: bool) returns (output_alw_false: bool);
+var alw_time: int;
+let 
+   alw_time = min(0 -> pre alw_time + 1, b);
+   
+   output_alw_false = exist (timeab_var(a, b), not phi);
+tel
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------- NODES FOR PROPERTIES VERIFICATION by --------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+----------------------------------------------------------------------
+--                Performance properties & useful nodes             --
+----------------------------------------------------------------------
+
+-- first time we reach the command
+-- we check the sign changement of the difference 
+-- between the current value and the command
+
+-- returns the absolute value of our signal
+node absolute_value (x: real) returns (abs: real)
+let
+    abs = if x >= 0.0 then x 
+          else -x;
+tel 
+----------------------------------------------------------------------
+--                      Useful nodes Eventually                     --
+----------------------------------------------------------------------
+
+node min (a,b: int) returns (valeur_min: int);
+let
+    valeur_min =
+        if a <= b then a
+        else b;
+tel
+
+node exist (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let
+    output = (inside_time_interval and prop) or (false -> pre output);
+tel
+
+node forall_a (inside_time_interval: bool ; prop: bool) returns (output: bool);
+let 
+    output = not(exist(inside_time_interval, not prop));
+tel
+
